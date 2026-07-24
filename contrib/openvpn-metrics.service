@@ -17,16 +17,17 @@ ExecStart=/usr/local/bin/openvpn-metrics collect \
 Restart=on-failure
 RestartSec=5
 
-# Capabilities the collector needs (it runs as root):
-#   CAP_NET_RAW / CAP_NET_ADMIN  - packet capture (tcpdump)
-#   CAP_SETUID / CAP_SETGID      - tcpdump drops privileges to the 'tcpdump'
-#                                  user on startup (Debian/Ubuntu default)
-#   CAP_DAC_READ_SEARCH          - read the OpenVPN status file, which is
-#                                  owned by the OpenVPN service user and often
-#                                  lives in a 0750 dir under /run
-AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_READ_SEARCH
-CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_READ_SEARCH
-NoNewPrivileges=true
+# Runs as root (the default). tcpdump needs raw-socket access and, on
+# Debian/Ubuntu, drops its own privileges to the 'tcpdump' user at startup;
+# the collector also reads the OpenVPN status file, which is owned by the
+# OpenVPN service user. All of that "just works" as unrestricted root.
+#
+# NOTE: do not add CapabilityBoundingSet / AmbientCapabilities / User= here
+# unless you know exactly which capabilities tcpdump's privilege-drop and the
+# status-file read require (CAP_NET_RAW, CAP_NET_ADMIN, CAP_SETUID, CAP_SETGID,
+# CAP_DAC_READ_SEARCH at minimum). Getting that list wrong makes tcpdump exit
+# with "Operation not permitted" and the service flaps. The filesystem
+# protections below are safe and do not touch capabilities.
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/openvpn-metrics
