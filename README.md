@@ -145,7 +145,27 @@ tun0 ──▶ tcpdump -tt -l -n -q ──▶ line parser ──▶ classify ─
 | `--bucket-seconds` | Aggregation granularity; lower = more detail, bigger DB |
 | `--filter 'not port 53'` | Extra BPF filter passed to tcpdump |
 | `--vpn-subnet 10.8.0.0/24 --keep-unmapped` | Record traffic from VPN IPs missing from the status file as `unmapped:<ip>` instead of dropping it |
+| `--retention 24h` | Auto-delete data older than this while collecting (see below) |
 | `--stdin` | Read tcpdump-formatted lines from stdin (testing/replay) |
+
+## Retention: keeping disk usage bounded
+
+Without retention the traffic table grows forever. Two tools, use either or
+both:
+
+- **Automatic** (recommended): add `--retention 24h` (or `7d`, `4w`, ...) to
+  the `collect` command / systemd unit. The collector prunes anything older
+  every 15 minutes. SQLite reuses the freed pages for new data, so the
+  database file **plateaus** at roughly the size of the retention window and
+  stops growing — no cron or logrotate needed.
+- **Manual**: `openvpn-metrics prune --keep 24h` deletes older data on
+  demand (safe while the collector is running). Add `--vacuum` to also
+  shrink the file on disk — useful once after enabling retention on a
+  database that had already grown large.
+
+Pruning removes traffic buckets, stale sessions, expired reverse-DNS cache
+entries, and clients left with no data. Currently-connected clients are
+never pruned (their sessions refresh on every status poll).
 
 Replay a capture without touching an interface:
 

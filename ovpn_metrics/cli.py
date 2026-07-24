@@ -12,7 +12,8 @@ from .capture import StdinCapture, TcpdumpCapture
 from .collector import run_collect
 from .db import Database
 from .resolve import Resolver
-from .util import format_bytes, format_ts, parse_when, print_json, print_table
+from .util import (format_bytes, format_ts, parse_duration, parse_when,
+                   print_json, print_table)
 
 DEFAULT_DB = "/var/lib/openvpn-metrics/metrics.db"
 DEFAULT_STATUS = "/var/log/openvpn/status.log"
@@ -86,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep-unmapped", action="store_true",
                    help="record traffic from VPN-subnet IPs with no status "
                         "entry as 'unmapped:<ip>' instead of dropping it")
+    p.add_argument("--retention", metavar="DURATION", default="",
+                   help="delete data older than this while collecting, e.g. "
+                        "'24h', '7d' (default: keep everything)")
     p.add_argument("--stdin", action="store_true",
                    help="read tcpdump-formatted lines from stdin instead of "
                         "spawning tcpdump (for testing/replay)")
@@ -139,6 +143,23 @@ def build_parser() -> argparse.ArgumentParser:
     _add_db_arg(p)
     p.add_argument("--json", action="store_true")
 
+    # prune
+    p = sub.add_parser(
+        "prune",
+        help="delete data older than a retention window",
+        description="Deletes traffic, session and reverse-DNS data older "
+                    "than the given window. Safe to run while the collector "
+                    "is running. Freed space is reused by new data; pass "
+                    "--vacuum to also shrink the file on disk after a large "
+                    "one-off prune.",
+    )
+    _add_db_arg(p)
+    p.add_argument("--keep", required=True, metavar="DURATION",
+                   help="how much history to keep, e.g. '24h', '7d', '4w'")
+    p.add_argument("--vacuum", action="store_true",
+                   help="rewrite the database file to release freed disk "
+                        "space to the OS")
+
     # doctor
     p = sub.add_parser(
         "doctor",
@@ -189,6 +210,7 @@ def cmd_collect(args) -> int:
         capture = TcpdumpCapture(
             args.interface, tcpdump_path=args.tcpdump_path, bpf_filter=bpf
         )
+    retention = parse_duration(args.retention) if args.retention else 0.0
     try:
         run_collect(
             db_path=args.db,
@@ -199,6 +221,7 @@ def cmd_collect(args) -> int:
             status_interval=args.status_interval,
             vpn_subnets=args.vpn_subnet,
             keep_unmapped=args.keep_unmapped,
+            retention_seconds=retention,
         )
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -372,6 +395,39 @@ def cmd_summary(args) -> int:
     return 0
 
 
+def cmd_prune(args) -> int:
+    import os
+    import time
+
+    keep = parse_duration(args.keep)
+    db = Database(args.db)
+
+    def _size() -> int:
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                total += os.path.getsize(args.db + suffix)
+            except OSError:
+                pass
+        return total
+
+    before = _size()
+    counts = db.prune(time.time() - keep)
+    print(f"kept last {args.keep}; deleted "
+          f"{counts['traffic']} traffic rows, {counts['sessions']} sessions, "
+          f"{counts['rdns']} cached DNS entries, "
+          f"{counts['clients']} idle clients")
+    if args.vacuum:
+        db.vacuum()
+        after = _size()
+        print(f"vacuumed: {format_bytes(before)} -> {format_bytes(after)}")
+    else:
+        print(f"database file: {format_bytes(before)} (freed pages will be "
+              "reused; run with --vacuum to shrink the file now)")
+    db.close()
+    return 0
+
+
 def cmd_doctor(args) -> int:
     from .doctor import run_doctor
     return run_doctor(
@@ -390,6 +446,7 @@ _COMMANDS = {
     "ip": cmd_ip,
     "sessions": cmd_sessions,
     "summary": cmd_summary,
+    "prune": cmd_prune,
     "doctor": cmd_doctor,
 }
 

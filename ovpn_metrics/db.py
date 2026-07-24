@@ -68,6 +68,7 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA busy_timeout=10000")
         self.conn.executescript(SCHEMA)
         self._lock = threading.Lock()
         self._client_ids: Dict[str, int] = {}
@@ -139,6 +140,47 @@ class Database:
                      s.connected_since, s.bytes_received, s.bytes_sent, now),
                 )
             self.conn.commit()
+
+    def prune(self, cutoff_ts: float) -> Dict[str, int]:
+        """Delete data older than cutoff_ts (epoch seconds).
+
+        Removes traffic buckets, sessions, and reverse-DNS cache entries
+        last touched before the cutoff. Freed pages are reused by future
+        inserts, so with periodic pruning the database file stops growing
+        once it reaches the size of the retention window (use vacuum() to
+        actually shrink the file after a large one-off prune).
+        """
+        with self._lock:
+            traffic = self.conn.execute(
+                "DELETE FROM traffic WHERE bucket < ?", (int(cutoff_ts),)
+            ).rowcount
+            sessions = self.conn.execute(
+                "DELETE FROM sessions WHERE last_seen < ?", (cutoff_ts,)
+            ).rowcount
+            rdns = self.conn.execute(
+                "DELETE FROM rdns WHERE resolved_at < ?", (cutoff_ts,)
+            ).rowcount
+            # drop clients that no longer have any data
+            clients = self.conn.execute(
+                """
+                DELETE FROM clients WHERE id NOT IN
+                    (SELECT client_id FROM traffic
+                     UNION SELECT client_id FROM sessions)
+                """
+            ).rowcount
+            self.conn.commit()
+            self._client_ids.clear()  # ids may have been deleted
+        return {"traffic": traffic, "sessions": sessions,
+                "rdns": rdns, "clients": clients}
+
+    def vacuum(self) -> None:
+        """Rewrite the database file to return freed pages to the OS."""
+        with self._lock:
+            self.conn.commit()
+            self.conn.execute("VACUUM")
+            # in WAL mode the rewrite lands in the -wal file; fold it back
+            # into the main file and truncate the WAL so disk usage shrinks
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     def rdns_get(self, ips) -> Dict[str, Tuple[str, float]]:
         """Return {ip: (hostname, resolved_at)} for cached entries."""
