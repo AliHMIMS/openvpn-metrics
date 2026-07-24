@@ -1,0 +1,166 @@
+# openvpn-metrics
+
+A zero-dependency CLI that collects per-client traffic metrics from an
+OpenVPN server and lets you query them:
+
+- **Per client**: select a client and see every IP it hit, and when.
+- **Per IP**: filter by a remote IP and see which clients hit it, and when.
+- Sessions, totals, timelines, time-range filters, JSON output.
+
+It works by **attaching to `tcpdump` on the OpenVPN tunnel interface**
+(`tun0`) and mapping each packet's VPN-internal IP to a client certificate
+common name using the OpenVPN **status file**. Traffic is aggregated into
+time buckets (60s by default) and stored in a local SQLite database, so the
+database stays small even under sustained traffic.
+
+Pure Python 3 standard library — no pip packages, no libpcap bindings.
+Requirements on the server: `python3` (≥ 3.8) and `tcpdump`.
+
+## Setup
+
+### 1. Enable the OpenVPN status file
+
+In your server config (e.g. `/etc/openvpn/server.conf`):
+
+```
+status /var/log/openvpn/status.log 10
+```
+
+Status versions 1 (default), 2, and 3 are all supported. Restart OpenVPN
+after changing the config.
+
+### 2. Install
+
+```sh
+git clone <this repo> && cd openvpn-metrics
+pip install .            # installs the `openvpn-metrics` command
+# — or run it in place without installing:
+python3 -m ovpn_metrics --help
+```
+
+### 3. Start the collector
+
+Capturing packets requires root (or a tcpdump binary with `CAP_NET_RAW`):
+
+```sh
+sudo openvpn-metrics collect \
+    --interface tun0 \
+    --status-file /var/log/openvpn/status.log \
+    --db /var/lib/openvpn-metrics/metrics.db
+```
+
+Leave it running — a systemd unit is provided in
+[`contrib/openvpn-metrics.service`](contrib/openvpn-metrics.service):
+
+```sh
+sudo cp contrib/openvpn-metrics.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now openvpn-metrics
+```
+
+## Querying
+
+All query commands accept `--db`, `--since`/`--until` (`30m`, `4h`, `7d`,
+`2026-07-24`, `2026-07-24 13:00`), `--limit`, and `--json`.
+
+**List clients and totals:**
+
+```
+$ openvpn-metrics clients
+CLIENT  REMOTE IPS  PACKETS  TRAFFIC  FIRST SEEN           LAST SEEN
+------  ----------  -------  -------  -------------------  -------------------
+alice   2           4        2.0 KiB  2026-07-23 19:46:40  2026-07-23 19:47:50
+bob     2           2        550 B    2026-07-23 19:48:40  2026-07-23 19:48:41
+```
+
+**Select a client → IPs they hit + when:**
+
+```
+$ openvpn-metrics client alice --since 7d
+REMOTE IP       PKTS OUT  PKTS IN  TRAFFIC  FIRST SEEN           LAST SEEN
+--------------  --------  -------  -------  -------------------  -------------------
+8.8.8.8         1         0        48 B     2026-07-23 19:47:50  2026-07-23 19:47:50
+142.250.185.78  2         1        2.0 KiB  2026-07-23 19:46:40  2026-07-23 19:47:45
+
+$ openvpn-metrics client alice --timeline          # per-time-bucket detail
+$ openvpn-metrics client alice --ip 8.8.8.8 --timeline
+$ openvpn-metrics client alice --by-port           # break down by port/proto
+```
+
+**Filter by IP → which clients hit it + when:**
+
+```
+$ openvpn-metrics ip 142.250.185.78
+CLIENT  PKTS OUT  PKTS IN  TRAFFIC  FIRST SEEN           LAST SEEN
+------  --------  -------  -------  -------------------  -------------------
+bob     1         0        200 B    2026-07-23 19:48:40  2026-07-23 19:48:40
+alice   2         1        2.0 KiB  2026-07-23 19:46:40  2026-07-23 19:47:45
+
+$ openvpn-metrics ip 142.250.185.78 --timeline
+```
+
+**Sessions and overall stats:**
+
+```
+$ openvpn-metrics sessions        # connections seen in the status file
+$ openvpn-metrics summary         # database-wide totals
+```
+
+## How it works
+
+```
+tun0 ──▶ tcpdump -tt -l -n -q ──▶ line parser ──▶ classify ──▶ aggregate ──▶ SQLite
+                                                     ▲
+                     status file (poll every 10s) ───┘
+                     virtual IP ──▶ client common name
+```
+
+- The collector spawns `tcpdump` as a subprocess and parses its
+  line-oriented output; there is nothing to compile and no libpcap binding.
+- The status file's routing table maps each VPN virtual IP to the client
+  common name. It's polled every `--status-interval` seconds (10 by
+  default), so reconnects and re-assigned IPs are picked up quickly.
+- Each packet is attributed to the client on its VPN side; the other side
+  is the "remote IP". Direction is `out` (client → remote) or `in`.
+- Packets are aggregated in memory per
+  `(client, remote IP, remote port, protocol, direction, time bucket)` and
+  flushed to SQLite every `--flush-interval` seconds (5 by default).
+
+### Useful collector options
+
+| Option | Purpose |
+| --- | --- |
+| `-i/--interface` | Tunnel interface to capture on (default `tun0`) |
+| `-s/--status-file` | OpenVPN status file path |
+| `--bucket-seconds` | Aggregation granularity; lower = more detail, bigger DB |
+| `--filter 'not port 53'` | Extra BPF filter passed to tcpdump |
+| `--vpn-subnet 10.8.0.0/24 --keep-unmapped` | Record traffic from VPN IPs missing from the status file as `unmapped:<ip>` instead of dropping it |
+| `--stdin` | Read tcpdump-formatted lines from stdin (testing/replay) |
+
+Replay a capture without touching an interface:
+
+```sh
+tcpdump -r capture.pcap -tt -n -q | openvpn-metrics collect --stdin --db test.db -s status.log
+```
+
+## Notes & limitations
+
+- Byte counts are the payload lengths tcpdump reports (IP header overhead
+  is not included); treat them as good relative indicators.
+- If two clients exchange traffic with each other over the VPN, the packet
+  is attributed to the *originating* client.
+- The database only knows about clients that generated traffic or appeared
+  in the status file while the collector was running. Issued-but-never-seen
+  certificates won't appear.
+- Privacy: this records every remote IP each VPN user contacts. Make sure
+  that's acceptable (and lawful) for your users before deploying.
+
+## Development
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+## License
+
+MIT
