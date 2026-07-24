@@ -193,11 +193,15 @@ The most common causes:
     `/run`), so reading it as the sandboxed service needs
     `CAP_DAC_READ_SEARCH`.
 
-  Both come from too tight a `CapabilityBoundingSet`. The provided unit now
-  grants `CAP_NET_RAW CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_READ_SEARCH`
-  in both `AmbientCapabilities` and `CapabilityBoundingSet`; make sure your
-  installed copy matches. `doctor` runs as unrestricted root and so won't
-  reproduce these — check the journal for the running service.
+  Both come from restricting the service's capabilities (`User=`,
+  `CapabilityBoundingSet=`, `AmbientCapabilities=`). tcpdump's startup
+  privilege-drop and the status-file read need a specific capability set
+  that is easy to get wrong. The provided unit therefore runs as plain root
+  with **no** capability restrictions — that's the reliable configuration.
+  If you want to re-harden with an explicit capability list, you need at
+  least `CAP_NET_RAW CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_READ_SEARCH`.
+  `doctor` runs as unrestricted root and so won't reproduce a sandbox-only
+  failure — check `journalctl -u openvpn-metrics` for the running service.
 
 ## Notes & limitations
 
