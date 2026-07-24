@@ -8,8 +8,9 @@ import threading
 import time
 from typing import Dict, Optional
 
-from .capture import Packet
+from .capture import Packet, TcpdumpCapture
 from .db import AggKey, AggVal, Database
+from .dns import queries_from_lines
 from .status import read_status_file
 
 log = logging.getLogger("ovpn-metrics")
@@ -201,6 +202,75 @@ class Collector:
             )
 
 
+class DnsCollector:
+    """Aggregates DNS queries per (client, qname, qtype, bucket)."""
+
+    def __init__(self, db: Database, watcher: StatusWatcher,
+                 bucket_seconds: int = 60, flush_interval: float = 5.0):
+        self.db = db
+        self.watcher = watcher
+        self.bucket_seconds = max(1, bucket_seconds)
+        self.flush_interval = flush_interval
+        self._agg: Dict = {}
+        self._lock = threading.Lock()
+        self._last_flush = time.monotonic()
+        self.queries_seen = 0
+        self.queries_recorded = 0
+
+    def add_query(self, q) -> None:
+        self.queries_seen += 1
+        client = self.watcher.lookup(q.client_ip)
+        if client is None:
+            return  # query from an IP not currently mapped to a client
+        self.queries_recorded += 1
+        bucket = int(q.ts) - int(q.ts) % self.bucket_seconds
+        key = (client, q.qname, q.qtype, bucket)
+        with self._lock:
+            val = self._agg.get(key)
+            if val is None:
+                self._agg[key] = [1, q.ts, q.ts]
+            else:
+                val[0] += 1
+                val[1] = min(val[1], q.ts)
+                val[2] = max(val[2], q.ts)
+
+    def flush(self) -> int:
+        with self._lock:
+            pending, self._agg = self._agg, {}
+        n = self.db.flush_dns(pending)
+        self._last_flush = time.monotonic()
+        return n
+
+    def run(self, capture) -> None:
+        try:
+            for q in queries_from_lines(capture.lines()):
+                self.add_query(q)
+                if time.monotonic() - self._last_flush >= self.flush_interval:
+                    self.flush()
+        except KeyboardInterrupt:
+            pass
+        except Exception:
+            log.exception("DNS collector stopped on error")
+        finally:
+            capture.stop()
+            self.flush()
+            log.info("DNS collector stopped: %d queries seen, %d attributed",
+                     self.queries_seen, self.queries_recorded)
+
+
+class _DnsThread(threading.Thread):
+    def __init__(self, collector: DnsCollector, capture):
+        super().__init__(daemon=True, name="dns-collector")
+        self.collector = collector
+        self.capture = capture
+
+    def run(self) -> None:
+        self.collector.run(self.capture)
+
+    def stop(self) -> None:
+        self.capture.stop()
+
+
 def run_collect(
     db_path: str,
     status_path: str,
@@ -211,8 +281,14 @@ def run_collect(
     vpn_subnets: Optional[list] = None,
     keep_unmapped: bool = False,
     retention_seconds: float = 0.0,
+    dns_capture=None,
 ) -> Collector:
-    """Wire up watcher + collector and run until the capture ends."""
+    """Wire up watcher + collector and run until the capture ends.
+
+    If ``dns_capture`` is given, a DNS collector runs alongside the traffic
+    collector on that capture (a second tcpdump on port 53), attributing
+    queries to clients via the same status watcher.
+    """
     db = Database(db_path)
     watcher = StatusWatcher(status_path, db, interval=status_interval)
     watcher.refresh()  # synchronous first read so early packets can be mapped
@@ -226,10 +302,20 @@ def run_collect(
         keep_unmapped=keep_unmapped,
         retention_seconds=retention_seconds,
     )
+    dns_thread = None
+    if dns_capture is not None:
+        dns_collector = DnsCollector(db, watcher, bucket_seconds=bucket_seconds,
+                                     flush_interval=flush_interval)
+        dns_thread = _DnsThread(dns_collector, dns_capture)
+        dns_thread.start()
+        log.info("DNS query logging enabled")
     log.info("collecting: db=%s status=%s", db_path, status_path)
     try:
         collector.run(capture)
     finally:
+        if dns_thread is not None:
+            dns_thread.stop()
+            dns_thread.join(timeout=5)
         watcher.stop()
         db.close()
     return collector

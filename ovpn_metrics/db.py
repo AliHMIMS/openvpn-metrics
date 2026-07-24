@@ -35,6 +35,20 @@ CREATE TABLE IF NOT EXISTS traffic (
 CREATE INDEX IF NOT EXISTS idx_traffic_remote ON traffic (remote_ip, bucket);
 CREATE INDEX IF NOT EXISTS idx_traffic_bucket ON traffic (bucket);
 
+CREATE TABLE IF NOT EXISTS dns_queries (
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    qname     TEXT    NOT NULL,
+    qtype     TEXT    NOT NULL,
+    bucket    INTEGER NOT NULL,             -- epoch secs, floored to bucket
+    queries   INTEGER NOT NULL DEFAULT 0,
+    first_ts  REAL    NOT NULL,
+    last_ts   REAL    NOT NULL,
+    PRIMARY KEY (client_id, qname, qtype, bucket)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dns_qname ON dns_queries (qname, bucket);
+CREATE INDEX IF NOT EXISTS idx_dns_bucket ON dns_queries (bucket);
+
 CREATE TABLE IF NOT EXISTS rdns (
     ip          TEXT PRIMARY KEY,
     hostname    TEXT NOT NULL DEFAULT '',   -- '' = lookup failed (negative cache)
@@ -119,6 +133,32 @@ class Database:
             self.conn.commit()
         return len(aggregates)
 
+    def flush_dns(self, aggregates: Dict) -> int:
+        """Upsert DNS query aggregates.
+
+        key: (client_name, qname, qtype, bucket); value: [queries, first, last].
+        """
+        if not aggregates:
+            return 0
+        with self._lock:
+            for (name, qname, qtype, bucket), val in aggregates.items():
+                cid = self.client_id(name)
+                self.conn.execute(
+                    """
+                    INSERT INTO dns_queries
+                        (client_id, qname, qtype, bucket, queries, first_ts, last_ts)
+                    VALUES (?,?,?,?,?,?,?)
+                    ON CONFLICT(client_id, qname, qtype, bucket)
+                    DO UPDATE SET
+                        queries  = queries + excluded.queries,
+                        first_ts = MIN(first_ts, excluded.first_ts),
+                        last_ts  = MAX(last_ts, excluded.last_ts)
+                    """,
+                    (cid, qname, qtype, bucket, int(val[0]), val[1], val[2]),
+                )
+            self.conn.commit()
+        return len(aggregates)
+
     def record_sessions(self, sessions: Iterable, now: float) -> None:
         with self._lock:
             for s in sessions:
@@ -154,6 +194,9 @@ class Database:
             traffic = self.conn.execute(
                 "DELETE FROM traffic WHERE bucket < ?", (int(cutoff_ts),)
             ).rowcount
+            dns = self.conn.execute(
+                "DELETE FROM dns_queries WHERE bucket < ?", (int(cutoff_ts),)
+            ).rowcount
             sessions = self.conn.execute(
                 "DELETE FROM sessions WHERE last_seen < ?", (cutoff_ts,)
             ).rowcount
@@ -165,12 +208,13 @@ class Database:
                 """
                 DELETE FROM clients WHERE id NOT IN
                     (SELECT client_id FROM traffic
-                     UNION SELECT client_id FROM sessions)
+                     UNION SELECT client_id FROM sessions
+                     UNION SELECT client_id FROM dns_queries)
                 """
             ).rowcount
             self.conn.commit()
             self._client_ids.clear()  # ids may have been deleted
-        return {"traffic": traffic, "sessions": sessions,
+        return {"traffic": traffic, "dns": dns, "sessions": sessions,
                 "rdns": rdns, "clients": clients}
 
     def vacuum(self) -> None:
@@ -331,6 +375,86 @@ class Database:
             """,
             params,
         ).fetchall()
+
+    def dns_domains(self, client=None, contains=None,
+                    since=None, until=None, limit=0) -> List[sqlite3.Row]:
+        """Domains queried, one row per domain (optionally filtered)."""
+        clauses, params = self._dns_time_clause(since, until)
+        if client:
+            clauses.append("c.common_name = ?")
+            params.append(client)
+        if contains:
+            clauses.append("d.qname LIKE ?")
+            params.append(f"%{contains}%")
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        limit_sql = f"LIMIT {int(limit)}" if limit else ""
+        return self.conn.execute(
+            f"""
+            SELECT d.qname AS qname,
+                   SUM(d.queries)              AS queries,
+                   COUNT(DISTINCT d.client_id) AS clients,
+                   MIN(d.first_ts)             AS first_seen,
+                   MAX(d.last_ts)              AS last_seen
+            FROM dns_queries d JOIN clients c ON c.id = d.client_id
+            {where}
+            GROUP BY d.qname
+            ORDER BY last_seen DESC
+            {limit_sql}
+            """,
+            params,
+        ).fetchall()
+
+    def dns_domain_clients(self, qname, since=None, until=None) -> List[sqlite3.Row]:
+        """Which clients queried a domain."""
+        clauses, params = self._dns_time_clause(since, until)
+        clauses.insert(0, "d.qname = ?")
+        params.insert(0, qname)
+        return self.conn.execute(
+            f"""
+            SELECT c.common_name,
+                   SUM(d.queries)  AS queries,
+                   MIN(d.first_ts) AS first_seen,
+                   MAX(d.last_ts)  AS last_seen
+            FROM dns_queries d JOIN clients c ON c.id = d.client_id
+            WHERE {' AND '.join(clauses)}
+            GROUP BY c.id
+            ORDER BY last_seen DESC
+            """,
+            params,
+        ).fetchall()
+
+    def dns_timeline(self, client=None, qname=None,
+                     since=None, until=None, limit=0) -> List[sqlite3.Row]:
+        clauses, params = self._dns_time_clause(since, until)
+        if client:
+            clauses.append("c.common_name = ?")
+            params.append(client)
+        if qname:
+            clauses.append("d.qname = ?")
+            params.append(qname)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        limit_sql = f"LIMIT {int(limit)}" if limit else ""
+        return self.conn.execute(
+            f"""
+            SELECT d.bucket, c.common_name, d.qname, d.qtype, d.queries
+            FROM dns_queries d JOIN clients c ON c.id = d.client_id
+            {where}
+            ORDER BY d.bucket DESC, d.qname
+            {limit_sql}
+            """,
+            params,
+        ).fetchall()
+
+    @staticmethod
+    def _dns_time_clause(since, until):
+        clauses, params = [], []
+        if since is not None:
+            clauses.append("d.last_ts >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("d.first_ts <= ?")
+            params.append(until)
+        return clauses, params
 
     def list_sessions(self, client=None, limit=0) -> List[sqlite3.Row]:
         clauses, params = [], []

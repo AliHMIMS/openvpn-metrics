@@ -116,6 +116,50 @@ $ openvpn-metrics summary         # database-wide totals
 $ openvpn-metrics doctor          # diagnose collection problems (see below)
 ```
 
+**Which domains a client looked up** (requires `collect --dns`, see below):
+
+```
+$ openvpn-metrics dns --client alice
+DOMAIN          QUERIES  FIRST SEEN           LAST SEEN
+--------------  -------  -------------------  -------------------
+www.google.com  12       2026-07-24 09:00:01  2026-07-24 10:15:22
+github.com      3        2026-07-24 09:04:00  2026-07-24 09:04:10
+
+$ openvpn-metrics dns                      # top domains across all clients
+$ openvpn-metrics dns --domain github.com  # which clients queried a domain
+$ openvpn-metrics dns --contains google    # domains matching a substring
+$ openvpn-metrics dns --client alice --timeline --since 1h
+```
+
+### Capturing DNS (which sites clients visit)
+
+Full HTTP URLs are **not** recoverable for HTTPS traffic — the path is
+encrypted; only the hostname is exposed (via TLS SNI), and even that is
+being phased out by Encrypted ClientHello. The practical, robust signal for
+"which sites is this client visiting" is the **DNS query**: the hostname a
+client looks up before connecting.
+
+Enable it by adding `--dns` to `collect`. It starts a second tcpdump on
+port 53 (with full packet decode) alongside the traffic capture, and
+attributes each query to the client that sent it:
+
+```sh
+openvpn-metrics collect -i tun0 -s /run/openvpn-server/status-server.log \
+    --dns --retention 48h --db /var/lib/openvpn-metrics/metrics.db
+```
+
+Caveats to be aware of:
+
+- Only DNS that **crosses the tunnel** is seen — i.e. clients using a
+  resolver reachable over the VPN (typical when the server pushes `dhcp-option
+  DNS`). Clients using a local resolver or **DoH/DoT** (DNS over HTTPS/TLS)
+  won't show up; their lookups look like ordinary HTTPS.
+- A cached lookup generates no query, so a domain may be visited without a
+  fresh DNS row.
+- This records per-user lookup history — a real step up in what you're
+  storing. Make sure it fits your policy/consent; the `--retention` window
+  applies to DNS data too.
+
 ## How it works
 
 ```
