@@ -113,6 +113,7 @@ gains a `hostname` field.
 ```
 $ openvpn-metrics sessions        # connections seen in the status file
 $ openvpn-metrics summary         # database-wide totals
+$ openvpn-metrics doctor          # diagnose collection problems (see below)
 ```
 
 ## How it works
@@ -151,6 +152,38 @@ Replay a capture without touching an interface:
 ```sh
 tcpdump -r capture.pcap -tt -n -q | openvpn-metrics collect --stdin --db test.db -s status.log
 ```
+
+## Troubleshooting: no data being collected
+
+Run the built-in diagnostic with the **same** `-i`/`-s`/`--db` you use for
+`collect` (as root):
+
+```sh
+openvpn-metrics doctor -i tun0 -s /run/openvpn-server/status-server.log \
+    --db /var/lib/openvpn-metrics/metrics.db
+```
+
+It checks tcpdump, the interface, the status file, runs a short live capture
+probe, and inspects the database — then tells you which layer is broken. The
+capture probe is the key one: it distinguishes **"tcpdump sees nothing"**
+(wrong interface, or OpenVPN 2.6+ DCO bypassing the tun device) from
+**"packets seen but none map to a client"** (wrong or stale status file).
+
+The most common causes:
+
+- **The service's `ExecStart` still has the default paths.** The shipped
+  `contrib/openvpn-metrics.service` defaults to `tun0` and
+  `/var/log/openvpn/status.log`. If your server writes elsewhere (e.g.
+  `/run/openvpn-server/status-server.log`), edit `ExecStart` to match, then
+  `systemctl daemon-reload && systemctl restart openvpn-metrics`. Check what
+  the running service actually uses with `systemctl cat openvpn-metrics`, and
+  what it logged at startup with `journalctl -u openvpn-metrics -n 20` — the
+  first log line prints the exact db and status paths in use.
+- **Wrong interface.** `ip -brief link show | grep -iE 'tun|ovpn|dco'` lists
+  the real ones. `doctor` also prints the candidates it finds.
+- **Status file unreadable / not enabled.** The collector logs
+  `cannot read status file ...` and drops all traffic. Confirm `status
+  <path>` is in the server config and the path matches.
 
 ## Notes & limitations
 

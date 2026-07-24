@@ -176,6 +176,49 @@ class TcpdumpCapture:
                 self.proc.kill()
                 self.proc.wait()
 
+    def sample(self, seconds: float) -> "CaptureSample":
+        """Capture for a bounded time; used by `doctor` to probe an interface.
+
+        Returns the parsed packets, tcpdump's stderr banner/errors, and its
+        exit status. Never raises for a normal capture — a bad interface
+        just shows up as an error string and a non-zero return code.
+        """
+        import threading
+
+        self.start()
+        assert self.proc is not None and self.proc.stdout is not None
+        packets: List[Packet] = []
+
+        def reader() -> None:
+            try:
+                for line in self.proc.stdout:  # type: ignore[union-attr]
+                    pkt = parse_line(line)
+                    if pkt is not None:
+                        packets.append(pkt)
+            except (ValueError, OSError):
+                pass
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        thread.join(seconds)  # let it run for the sample window
+        self.stop()           # terminate tcpdump so the reader loop ends
+        thread.join(2)
+
+        stderr = ""
+        if self.proc.stderr is not None:
+            try:
+                stderr = self.proc.stderr.read().strip()
+            except (ValueError, OSError):
+                stderr = ""
+        return CaptureSample(packets, stderr, self.proc.returncode)
+
+
+@dataclass
+class CaptureSample:
+    packets: List[Packet]
+    stderr: str
+    returncode: Optional[int]
+
 
 class StdinCapture:
     """Reads tcpdump-formatted lines from a stream (testing / replay)."""
