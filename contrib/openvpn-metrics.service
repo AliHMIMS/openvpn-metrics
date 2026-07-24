@@ -7,12 +7,14 @@ Wants=network.target
 [Service]
 Type=simple
 # Edit these to match your server: interface, status file path (the same one
-# `status` writes to in the OpenVPN server config), and --status-interval to
-# match the status file's refresh seconds.
+# `status` writes to in the OpenVPN server config), --status-interval to
+# match the status file's refresh seconds, and --retention for how much
+# history to keep (bounds the database size; drop the flag to keep forever).
 ExecStart=/usr/local/bin/openvpn-metrics collect \
     --interface tun0 \
     --status-file /var/log/openvpn/status.log \
     --status-interval 10 \
+    --retention 24h \
     --db /var/lib/openvpn-metrics/metrics.db
 Restart=on-failure
 RestartSec=5

@@ -74,12 +74,17 @@ class Collector:
         flush_interval: float = 5.0,
         vpn_subnets: Optional[list] = None,
         keep_unmapped: bool = False,
+        retention_seconds: float = 0.0,
+        prune_interval: float = 900.0,
     ):
         self.db = db
         self.watcher = watcher
         self.bucket_seconds = max(1, bucket_seconds)
         self.flush_interval = flush_interval
         self.keep_unmapped = keep_unmapped
+        self.retention_seconds = retention_seconds
+        self.prune_interval = prune_interval
+        self._last_prune: Optional[float] = None  # None -> prune on first packet
         self.vpn_networks = [
             ipaddress.ip_network(s, strict=False) for s in (vpn_subnets or [])
         ]
@@ -156,6 +161,26 @@ class Collector:
         if time.monotonic() - self._last_flush >= self.flush_interval:
             self.flush()
 
+    def prune(self) -> None:
+        cutoff = time.time() - self.retention_seconds
+        counts = self.db.prune(cutoff)
+        self._last_prune = time.monotonic()
+        if any(counts.values()):
+            log.info(
+                "retention prune (older than %.0fh): "
+                "%d traffic rows, %d sessions, %d rdns, %d idle clients",
+                self.retention_seconds / 3600, counts["traffic"],
+                counts["sessions"], counts["rdns"], counts["clients"],
+            )
+
+    def maybe_prune(self) -> None:
+        if not self.retention_seconds:
+            return
+        if (self._last_prune is not None
+                and time.monotonic() - self._last_prune < self.prune_interval):
+            return
+        self.prune()
+
     # -- main loop ---------------------------------------------------------
 
     def run(self, capture) -> None:
@@ -164,6 +189,7 @@ class Collector:
             for pkt in capture.packets():
                 self.add_packet(pkt)
                 self.maybe_flush()
+                self.maybe_prune()
         except KeyboardInterrupt:
             pass
         finally:
@@ -184,6 +210,7 @@ def run_collect(
     status_interval: float = 10.0,
     vpn_subnets: Optional[list] = None,
     keep_unmapped: bool = False,
+    retention_seconds: float = 0.0,
 ) -> Collector:
     """Wire up watcher + collector and run until the capture ends."""
     db = Database(db_path)
@@ -197,6 +224,7 @@ def run_collect(
         flush_interval=flush_interval,
         vpn_subnets=vpn_subnets,
         keep_unmapped=keep_unmapped,
+        retention_seconds=retention_seconds,
     )
     log.info("collecting: db=%s status=%s", db_path, status_path)
     try:

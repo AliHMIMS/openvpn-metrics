@@ -35,6 +35,19 @@ def parse_when(value: str, now: Optional[float] = None) -> float:
     )
 
 
+def parse_duration(value: str) -> float:
+    """Parse a duration like '30m', '24h', '7d', '2w' or plain seconds."""
+    value = value.strip()
+    m = _RELATIVE_RE.match(value)
+    if m:
+        return int(m.group(1)) * _UNIT_SECONDS[m.group(2)]
+    if value.isdigit():
+        return float(value)
+    raise ValueError(
+        f"unrecognized duration {value!r}; use e.g. '30m', '24h', '7d', '2w'"
+    )
+
+
 def format_ts(ts: Optional[float]) -> str:
     if ts is None or ts == 0:
         return "-"
