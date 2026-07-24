@@ -77,10 +77,10 @@ bob     2           2        550 B    2026-07-23 19:48:40  2026-07-23 19:48:41
 
 ```
 $ openvpn-metrics client alice --since 7d
-REMOTE IP       PKTS OUT  PKTS IN  TRAFFIC  FIRST SEEN           LAST SEEN
---------------  --------  -------  -------  -------------------  -------------------
-8.8.8.8         1         0        48 B     2026-07-23 19:47:50  2026-07-23 19:47:50
-142.250.185.78  2         1        2.0 KiB  2026-07-23 19:46:40  2026-07-23 19:47:45
+REMOTE IP       HOST                       PKTS OUT  PKTS IN  TRAFFIC  FIRST SEEN           LAST SEEN
+--------------  -------------------------  --------  -------  -------  -------------------  -------------------
+8.8.8.8         dns.google                 1         0        48 B     2026-07-23 19:47:50  2026-07-23 19:47:50
+142.250.185.78  fra16s48-in-f14.1e100.net  2         1        2.0 KiB  2026-07-23 19:46:40  2026-07-23 19:47:45
 
 $ openvpn-metrics client alice --timeline          # per-time-bucket detail
 $ openvpn-metrics client alice --ip 8.8.8.8 --timeline
@@ -98,6 +98,15 @@ alice   2         1        2.0 KiB  2026-07-23 19:46:40  2026-07-23 19:47:45
 
 $ openvpn-metrics ip 142.250.185.78 --timeline
 ```
+
+**Reverse DNS.** The HOST column (and the `<ip> = <hostname>` line on the
+`ip` command) comes from a reverse-DNS (PTR) lookup done at query time.
+Results are cached in the database — 24 h for successes, 1 h for failures —
+and lookups run concurrently under an overall time budget, so slow PTR
+zones can't hang a query: unresolved IPs show `-` and are retried on the
+next query. Pass `--no-resolve` to skip lookups entirely (this also avoids
+sending PTR queries for every displayed IP to your resolver). JSON output
+gains a `hostname` field.
 
 **Sessions and overall stats:**
 
