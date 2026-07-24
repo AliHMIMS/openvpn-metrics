@@ -6,22 +6,32 @@ Wants=network.target
 
 [Service]
 Type=simple
+# Edit these to match your server: interface, status file path (must be the
+# same one `status` writes to in the OpenVPN config), and --status-interval
+# to match the status file's refresh seconds.
 ExecStart=/usr/local/bin/openvpn-metrics collect \
     --interface tun0 \
     --status-file /var/log/openvpn/status.log \
+    --status-interval 10 \
     --db /var/lib/openvpn-metrics/metrics.db
 Restart=on-failure
 RestartSec=5
 
-# Hardening: capturing needs CAP_NET_RAW/CAP_NET_ADMIN, nothing else.
+# Capabilities the collector needs (it runs as root):
+#   CAP_NET_RAW / CAP_NET_ADMIN  - packet capture (tcpdump)
+#   CAP_SETUID / CAP_SETGID      - tcpdump drops privileges to the 'tcpdump'
+#                                  user on startup (Debian/Ubuntu default)
+#   CAP_DAC_READ_SEARCH          - read the OpenVPN status file, which is
+#                                  owned by the OpenVPN service user and often
+#                                  lives in a 0750 dir under /run
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_READ_SEARCH
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/openvpn-metrics
 StateDirectory=openvpn-metrics
 PrivateTmp=true
-CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
-AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target
