@@ -139,6 +139,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_db_arg(p)
     p.add_argument("--json", action="store_true")
 
+    # doctor
+    p = sub.add_parser(
+        "doctor",
+        help="diagnose why collection isn't producing data",
+        description="Runs checks (tcpdump, interface, status file, a short "
+                    "live capture probe, database) and reports what's wrong. "
+                    "Run as root with the same -i/-s/--db you pass to collect.",
+    )
+    _add_db_arg(p)
+    p.add_argument("-i", "--interface", default=DEFAULT_INTERFACE,
+                   help=f"tunnel interface to probe (default: {DEFAULT_INTERFACE})")
+    p.add_argument("-s", "--status-file", default=DEFAULT_STATUS,
+                   help=f"OpenVPN status file path (default: {DEFAULT_STATUS})")
+    p.add_argument("--tcpdump-path", default="tcpdump",
+                   help="tcpdump binary to use (default: tcpdump from PATH)")
+    p.add_argument("--capture-seconds", type=float, default=6.0,
+                   help="how long the live capture probe samples (default: 6)")
+
     return parser
 
 
@@ -354,6 +372,17 @@ def cmd_summary(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    from .doctor import run_doctor
+    return run_doctor(
+        interface=args.interface,
+        status_path=args.status_file,
+        db_path=args.db,
+        tcpdump_path=args.tcpdump_path,
+        capture_seconds=args.capture_seconds,
+    )
+
+
 _COMMANDS = {
     "collect": cmd_collect,
     "clients": cmd_clients,
@@ -361,6 +390,7 @@ _COMMANDS = {
     "ip": cmd_ip,
     "sessions": cmd_sessions,
     "summary": cmd_summary,
+    "doctor": cmd_doctor,
 }
 
 
