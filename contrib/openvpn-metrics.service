@@ -6,9 +6,9 @@ Wants=network.target
 
 [Service]
 Type=simple
-# Edit these to match your server: interface, status file path (must be the
-# same one `status` writes to in the OpenVPN config), and --status-interval
-# to match the status file's refresh seconds.
+# Edit these to match your server: interface, status file path (the same one
+# `status` writes to in the OpenVPN server config), and --status-interval to
+# match the status file's refresh seconds.
 ExecStart=/usr/local/bin/openvpn-metrics collect \
     --interface tun0 \
     --status-file /var/log/openvpn/status.log \
@@ -17,22 +17,13 @@ ExecStart=/usr/local/bin/openvpn-metrics collect \
 Restart=on-failure
 RestartSec=5
 
-# Runs as root (the default). tcpdump needs raw-socket access and, on
-# Debian/Ubuntu, drops its own privileges to the 'tcpdump' user at startup;
-# the collector also reads the OpenVPN status file, which is owned by the
-# OpenVPN service user. All of that "just works" as unrestricted root.
-#
-# NOTE: do not add CapabilityBoundingSet / AmbientCapabilities / User= here
-# unless you know exactly which capabilities tcpdump's privilege-drop and the
-# status-file read require (CAP_NET_RAW, CAP_NET_ADMIN, CAP_SETUID, CAP_SETGID,
-# CAP_DAC_READ_SEARCH at minimum). Getting that list wrong makes tcpdump exit
-# with "Operation not permitted" and the service flaps. The filesystem
-# protections below are safe and do not touch capabilities.
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/openvpn-metrics
-StateDirectory=openvpn-metrics
-PrivateTmp=true
+# Runs as unrestricted root — deliberately. tcpdump needs raw sockets and
+# (on Debian/Ubuntu) drops privileges to the 'tcpdump' user at startup, and
+# the status file is owned by the OpenVPN service user; sandboxing directives
+# (User=, CapabilityBoundingSet=, AmbientCapabilities=, NoNewPrivileges=)
+# break one or both in ways that only appear under systemd, causing
+# "Operation not permitted" restart loops. If you re-harden, test with:
+#   systemctl restart openvpn-metrics && journalctl -u openvpn-metrics -n 8
 
 [Install]
 WantedBy=multi-user.target
