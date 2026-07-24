@@ -35,6 +35,12 @@ CREATE TABLE IF NOT EXISTS traffic (
 CREATE INDEX IF NOT EXISTS idx_traffic_remote ON traffic (remote_ip, bucket);
 CREATE INDEX IF NOT EXISTS idx_traffic_bucket ON traffic (bucket);
 
+CREATE TABLE IF NOT EXISTS rdns (
+    ip          TEXT PRIMARY KEY,
+    hostname    TEXT NOT NULL DEFAULT '',   -- '' = lookup failed (negative cache)
+    resolved_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     client_id       INTEGER NOT NULL REFERENCES clients(id),
     real_address    TEXT NOT NULL DEFAULT '',
@@ -132,6 +138,33 @@ class Database:
                     (cid, s.real_address, s.virtual_address,
                      s.connected_since, s.bytes_received, s.bytes_sent, now),
                 )
+            self.conn.commit()
+
+    def rdns_get(self, ips) -> Dict[str, Tuple[str, float]]:
+        """Return {ip: (hostname, resolved_at)} for cached entries."""
+        out: Dict[str, Tuple[str, float]] = {}
+        ips = list(ips)
+        for i in range(0, len(ips), 500):  # stay under SQLite's param limit
+            chunk = ips[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            for row in self.conn.execute(
+                f"SELECT ip, hostname, resolved_at FROM rdns WHERE ip IN ({marks})",
+                chunk,
+            ):
+                out[row["ip"]] = (row["hostname"], row["resolved_at"])
+        return out
+
+    def rdns_put(self, mapping: Dict[str, str], now: float) -> None:
+        with self._lock:
+            self.conn.executemany(
+                """
+                INSERT INTO rdns (ip, hostname, resolved_at) VALUES (?,?,?)
+                ON CONFLICT(ip) DO UPDATE SET
+                    hostname = excluded.hostname,
+                    resolved_at = excluded.resolved_at
+                """,
+                [(ip, hostname, now) for ip, hostname in mapping.items()],
+            )
             self.conn.commit()
 
     # -- queries -----------------------------------------------------------

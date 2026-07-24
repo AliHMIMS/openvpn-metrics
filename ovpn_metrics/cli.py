@@ -11,6 +11,7 @@ from . import __version__
 from .capture import StdinCapture, TcpdumpCapture
 from .collector import run_collect
 from .db import Database
+from .resolve import Resolver
 from .util import format_bytes, format_ts, parse_when, print_json, print_table
 
 DEFAULT_DB = "/var/lib/openvpn-metrics/metrics.db"
@@ -38,6 +39,8 @@ def _add_query_args(p: argparse.ArgumentParser) -> None:
                    help="output JSON instead of a table")
     p.add_argument("--limit", type=int, default=0,
                    help="limit number of rows (0 = no limit)")
+    p.add_argument("--no-resolve", action="store_true",
+                   help="skip reverse-DNS lookups on remote IPs")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -145,6 +148,17 @@ def _times(args) -> tuple:
     return since, until
 
 
+def _hostnames(args, db: Database, rows, key: str = "remote_ip") -> dict:
+    """Reverse-resolve the IPs appearing in `rows`; {} when disabled."""
+    if getattr(args, "no_resolve", False):
+        return {}
+    return Resolver(db).resolve(r[key] for r in rows)
+
+
+def _host(names: dict, ip: str) -> str:
+    return names.get(ip) or "-"
+
+
 def cmd_collect(args) -> int:
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -201,13 +215,17 @@ def cmd_client(args) -> int:
     if args.timeline:
         rows = db.client_timeline(args.name, remote_ip=args.ip,
                                   since=since, until=until, limit=args.limit)
+        names = _hostnames(args, db, rows)
         if args.json:
-            print_json(rows)
+            print_json(dict(r, hostname=names.get(r["remote_ip"], ""))
+                       for r in rows)
         else:
             print_table(
-                ["TIME", "REMOTE IP", "PORT", "PROTO", "DIR", "PACKETS", "TRAFFIC"],
+                ["TIME", "REMOTE IP", "HOST", "PORT", "PROTO", "DIR",
+                 "PACKETS", "TRAFFIC"],
                 [
                     (format_ts(r["bucket"]), r["remote_ip"],
+                     _host(names, r["remote_ip"]),
                      r["remote_port"] or "-", r["proto"], r["direction"],
                      r["packets"], format_bytes(r["bytes"]))
                     for r in rows
@@ -222,14 +240,17 @@ def cmd_client(args) -> int:
     if not rows and not args.json:
         print(f"no traffic recorded for client {args.name!r}", file=sys.stderr)
         return 1
+    names = _hostnames(args, db, rows)
     if args.json:
-        print_json(rows)
+        print_json(dict(r, hostname=names.get(r["remote_ip"], ""))
+                   for r in rows)
     elif args.by_port:
         print_table(
-            ["REMOTE IP", "PORT", "PROTO", "PKTS OUT", "PKTS IN", "TRAFFIC",
-             "FIRST SEEN", "LAST SEEN"],
+            ["REMOTE IP", "HOST", "PORT", "PROTO", "PKTS OUT", "PKTS IN",
+             "TRAFFIC", "FIRST SEEN", "LAST SEEN"],
             [
-                (r["remote_ip"], r["remote_port"] or "-", r["proto"],
+                (r["remote_ip"], _host(names, r["remote_ip"]),
+                 r["remote_port"] or "-", r["proto"],
                  r["packets_out"], r["packets_in"], format_bytes(r["bytes"]),
                  format_ts(r["first_seen"]), format_ts(r["last_seen"]))
                 for r in rows
@@ -237,10 +258,11 @@ def cmd_client(args) -> int:
         )
     else:
         print_table(
-            ["REMOTE IP", "PKTS OUT", "PKTS IN", "TRAFFIC",
+            ["REMOTE IP", "HOST", "PKTS OUT", "PKTS IN", "TRAFFIC",
              "FIRST SEEN", "LAST SEEN"],
             [
-                (r["remote_ip"], r["packets_out"], r["packets_in"],
+                (r["remote_ip"], _host(names, r["remote_ip"]),
+                 r["packets_out"], r["packets_in"],
                  format_bytes(r["bytes"]),
                  format_ts(r["first_seen"]), format_ts(r["last_seen"]))
                 for r in rows
@@ -252,12 +274,17 @@ def cmd_client(args) -> int:
 def cmd_ip(args) -> int:
     db = Database(args.db)
     since, until = _times(args)
+    hostname = ""
+    if not args.no_resolve:
+        hostname = Resolver(db).resolve([args.address]).get(args.address, "")
     if args.timeline:
         rows = db.ip_timeline(args.address, client=args.client,
                               since=since, until=until, limit=args.limit)
         if args.json:
-            print_json(rows)
+            print_json(dict(r, remote_hostname=hostname) for r in rows)
         else:
+            if hostname:
+                print(f"{args.address} = {hostname}\n")
             print_table(
                 ["TIME", "CLIENT", "PORT", "PROTO", "DIR", "PACKETS", "TRAFFIC"],
                 [
@@ -276,8 +303,10 @@ def cmd_ip(args) -> int:
         print(f"no traffic recorded for IP {args.address}", file=sys.stderr)
         return 1
     if args.json:
-        print_json(rows)
+        print_json(dict(r, remote_hostname=hostname) for r in rows)
     else:
+        if hostname:
+            print(f"{args.address} = {hostname}\n")
         print_table(
             ["CLIENT", "PKTS OUT", "PKTS IN", "TRAFFIC", "FIRST SEEN", "LAST SEEN"],
             [
@@ -344,6 +373,13 @@ def main(argv: Optional[list] = None) -> int:
         return 2
     except KeyboardInterrupt:
         return 130
+    except BrokenPipeError:
+        # output piped into head/less which exited early; not an error
+        try:
+            sys.stdout.close()
+        except OSError:
+            pass
+        return 141
 
 
 if __name__ == "__main__":
