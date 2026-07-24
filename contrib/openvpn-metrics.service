@@ -15,6 +15,7 @@ ExecStart=/usr/local/bin/openvpn-metrics collect \
     --status-file /var/log/openvpn/status.log \
     --status-interval 10 \
     --retention 48h \
+    --dns \
     --db /var/lib/openvpn-metrics/metrics.db
 Restart=on-failure
 RestartSec=5
