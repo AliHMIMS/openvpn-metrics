@@ -184,6 +184,20 @@ The most common causes:
 - **Status file unreadable / not enabled.** The collector logs
   `cannot read status file ...` and drops all traffic. Confirm `status
   <path>` is in the server config and the path matches.
+- **Service fails only under systemd** (works when you run it by hand).
+  `journalctl -u openvpn-metrics` shows one of:
+  - `tcpdump: Couldn't change to 'tcpdump' uid=... Operation not permitted`
+    — tcpdump drops privileges on startup and needs `CAP_SETUID`/`CAP_SETGID`.
+  - `cannot read status file ...` while the file is readable as root — the
+    status file is owned by the OpenVPN user (often in a `0750` dir under
+    `/run`), so reading it as the sandboxed service needs
+    `CAP_DAC_READ_SEARCH`.
+
+  Both come from too tight a `CapabilityBoundingSet`. The provided unit now
+  grants `CAP_NET_RAW CAP_NET_ADMIN CAP_SETUID CAP_SETGID CAP_DAC_READ_SEARCH`
+  in both `AmbientCapabilities` and `CapabilityBoundingSet`; make sure your
+  installed copy matches. `doctor` runs as unrestricted root and so won't
+  reproduce these — check the journal for the running service.
 
 ## Notes & limitations
 
