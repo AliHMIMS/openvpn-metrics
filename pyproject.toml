@@ -1,24 +1,7 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
-[project]
-name = "openvpn-metrics"
-version = "0.1.0"
-description = "Collect and query per-client OpenVPN traffic metrics by attaching to tcpdump"
-readme = "README.md"
-requires-python = ">=3.8"
-license = { text = "MIT" }
-keywords = ["openvpn", "metrics", "tcpdump", "monitoring"]
-classifiers = [
-    "Environment :: Console",
-    "Operating System :: POSIX :: Linux",
-    "Programming Language :: Python :: 3",
-    "Topic :: System :: Networking :: Monitoring",
-]
-
-[project.scripts]
-openvpn-metrics = "ovpn_metrics.cli:main"
-
-[tool.setuptools]
-packages = ["ovpn_metrics"]
+# Package metadata lives in setup.cfg (not the PEP 621 [project] table here)
+# so that older pip/setuptools found on long-lived VPN servers can still
+# build a working package instead of an empty "UNKNOWN-0.0.0" wheel.
