@@ -1,3 +1,3 @@
 """openvpn-metrics: collect and query per-client OpenVPN traffic metrics."""
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

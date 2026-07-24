@@ -121,20 +121,26 @@ class TcpdumpCapture:
         tcpdump_path: str = "tcpdump",
         bpf_filter: Optional[List[str]] = None,
         snaplen: int = 96,
+        quiet: bool = True,
     ):
         self.interface = interface
         self.tcpdump_path = tcpdump_path
         self.bpf_filter = bpf_filter or []
         self.snaplen = snaplen
+        # quiet (-q) gives terse per-packet lines for byte accounting; turn it
+        # off when we need tcpdump to decode a protocol (e.g. DNS query names).
+        self.quiet = quiet
         self.proc: Optional[subprocess.Popen] = None
 
     def command(self) -> List[str]:
         cmd = [
             self.tcpdump_path,
             "-i", self.interface,
-            "-tt", "-l", "-n", "-q",
-            "-s", str(self.snaplen),
+            "-tt", "-l", "-n",
         ]
+        if self.quiet:
+            cmd.append("-q")
+        cmd += ["-s", str(self.snaplen)]
         cmd.extend(self.bpf_filter)
         return cmd
 
@@ -152,12 +158,13 @@ class TcpdumpCapture:
             bufsize=1,
         )
 
-    def packets(self) -> Iterator[Packet]:
+    def lines(self) -> Iterator[str]:
+        """Yield raw tcpdump stdout lines, managing the subprocess lifecycle."""
         if self.proc is None:
             self.start()
         assert self.proc is not None and self.proc.stdout is not None
         try:
-            yield from packets_from_lines(self.proc.stdout)
+            yield from self.proc.stdout
         finally:
             self.stop()
         rc = self.proc.returncode
@@ -166,6 +173,9 @@ class TcpdumpCapture:
             if self.proc.stderr is not None:
                 err = self.proc.stderr.read().strip()
             raise RuntimeError(f"tcpdump exited with status {rc}: {err}")
+
+    def packets(self) -> Iterator[Packet]:
+        yield from packets_from_lines(self.lines())
 
     def stop(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
@@ -225,6 +235,9 @@ class StdinCapture:
 
     def __init__(self, stream: Optional[IO[str]] = None):
         self.stream = stream if stream is not None else sys.stdin
+
+    def lines(self) -> Iterator[str]:
+        yield from self.stream
 
     def packets(self) -> Iterator[Packet]:
         yield from packets_from_lines(self.stream)

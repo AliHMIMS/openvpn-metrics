@@ -90,6 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--retention", metavar="DURATION", default="",
                    help="delete data older than this while collecting, e.g. "
                         "'24h', '7d' (default: keep everything)")
+    p.add_argument("--dns", action="store_true",
+                   help="also log DNS queries (which domains each client "
+                        "looks up) via a second tcpdump on port 53")
     p.add_argument("--stdin", action="store_true",
                    help="read tcpdump-formatted lines from stdin instead of "
                         "spawning tcpdump (for testing/replay)")
@@ -142,6 +145,24 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("summary", help="database-wide totals")
     _add_db_arg(p)
     p.add_argument("--json", action="store_true")
+
+    # dns
+    p = sub.add_parser(
+        "dns",
+        help="domains clients looked up (requires collect --dns)",
+        description="Shows DNS queries captured by `collect --dns`. With no "
+                    "filters, lists the most-recently-queried domains. Use "
+                    "--client to see one client's domains, --domain to see "
+                    "which clients queried a domain, and --timeline for "
+                    "per-time-bucket detail.",
+    )
+    _add_query_args(p)
+    p.add_argument("--client", help="restrict to one client")
+    p.add_argument("--domain", help="exact domain: show which clients queried it")
+    p.add_argument("--contains", metavar="SUBSTR",
+                   help="only domains whose name contains SUBSTR")
+    p.add_argument("--timeline", action="store_true",
+                   help="show individual time buckets")
 
     # prune
     p = sub.add_parser(
@@ -203,6 +224,7 @@ def cmd_collect(args) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    dns_capture = None
     if args.stdin:
         capture = StdinCapture()
     else:
@@ -210,6 +232,12 @@ def cmd_collect(args) -> int:
         capture = TcpdumpCapture(
             args.interface, tcpdump_path=args.tcpdump_path, bpf_filter=bpf
         )
+        if args.dns:
+            # a second tcpdump, port 53, full snaplen, protocol decode on
+            dns_capture = TcpdumpCapture(
+                args.interface, tcpdump_path=args.tcpdump_path,
+                bpf_filter=["port", "53"], snaplen=0, quiet=False,
+            )
     retention = parse_duration(args.retention) if args.retention else 0.0
     try:
         run_collect(
@@ -222,6 +250,7 @@ def cmd_collect(args) -> int:
             vpn_subnets=args.vpn_subnet,
             keep_unmapped=args.keep_unmapped,
             retention_seconds=retention,
+            dns_capture=dns_capture,
         )
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -395,6 +424,65 @@ def cmd_summary(args) -> int:
     return 0
 
 
+def cmd_dns(args) -> int:
+    db = Database(args.db)
+    since, until = _times(args)
+
+    if args.timeline:
+        rows = db.dns_timeline(client=args.client, qname=args.domain,
+                               since=since, until=until, limit=args.limit)
+        if args.json:
+            print_json(rows)
+        else:
+            print_table(
+                ["TIME", "CLIENT", "DOMAIN", "TYPE", "QUERIES"],
+                [(format_ts(r["bucket"]), r["common_name"], r["qname"],
+                  r["qtype"], r["queries"]) for r in rows],
+            )
+        return 0
+
+    if args.domain:
+        rows = db.dns_domain_clients(args.domain, since=since, until=until)
+        if args.limit:
+            rows = rows[: args.limit]
+        if not rows and not args.json:
+            print(f"no DNS queries recorded for domain {args.domain!r}",
+                  file=sys.stderr)
+            return 1
+        if args.json:
+            print_json(rows)
+        else:
+            print_table(
+                ["CLIENT", "QUERIES", "FIRST SEEN", "LAST SEEN"],
+                [(r["common_name"], r["queries"], format_ts(r["first_seen"]),
+                  format_ts(r["last_seen"])) for r in rows],
+            )
+        return 0
+
+    rows = db.dns_domains(client=args.client, contains=args.contains,
+                          since=since, until=until, limit=args.limit)
+    if not rows and not args.json:
+        hint = "" if args.client else " (did you run `collect --dns`?)"
+        print(f"no DNS queries recorded{hint}", file=sys.stderr)
+        return 1
+    if args.json:
+        print_json(rows)
+    elif args.client:
+        print_table(
+            ["DOMAIN", "QUERIES", "FIRST SEEN", "LAST SEEN"],
+            [(r["qname"], r["queries"], format_ts(r["first_seen"]),
+              format_ts(r["last_seen"])) for r in rows],
+        )
+    else:
+        print_table(
+            ["DOMAIN", "QUERIES", "CLIENTS", "FIRST SEEN", "LAST SEEN"],
+            [(r["qname"], r["queries"], r["clients"],
+              format_ts(r["first_seen"]), format_ts(r["last_seen"]))
+             for r in rows],
+        )
+    return 0
+
+
 def cmd_prune(args) -> int:
     import os
     import time
@@ -414,8 +502,9 @@ def cmd_prune(args) -> int:
     before = _size()
     counts = db.prune(time.time() - keep)
     print(f"kept last {args.keep}; deleted "
-          f"{counts['traffic']} traffic rows, {counts['sessions']} sessions, "
-          f"{counts['rdns']} cached DNS entries, "
+          f"{counts['traffic']} traffic rows, {counts['dns']} DNS query rows, "
+          f"{counts['sessions']} sessions, "
+          f"{counts['rdns']} cached rDNS entries, "
           f"{counts['clients']} idle clients")
     if args.vacuum:
         db.vacuum()
@@ -446,6 +535,7 @@ _COMMANDS = {
     "ip": cmd_ip,
     "sessions": cmd_sessions,
     "summary": cmd_summary,
+    "dns": cmd_dns,
     "prune": cmd_prune,
     "doctor": cmd_doctor,
 }
